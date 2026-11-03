@@ -84,6 +84,14 @@ var (
 
 // Server is an HTTP/2 server.
 type Server struct {
+	// WriteBufferSize specifies the connection-level output buffer size in bytes.
+	// Zero or negative values use 64 KiB. Set it before serving connections;
+	// changing it while the Server is serving is not supported.
+	// This does not change per-stream buffers, flush timing, or flow-control windows.
+	// Buffers are allocated lazily and released on flush. Power-of-two sizes
+	// from 4 KiB through 1 MiB share size-specific pools; other sizes are unpooled.
+	WriteBufferSize int
+
 	// MaxHandlers limits the number of http.Handler ServeHTTP goroutines
 	// which may run at a time over all connections.
 	// Negative or zero no limit.
@@ -371,7 +379,7 @@ func (s *Server) ServeConn(c net.Conn, opts *ServeConnOpts) {
 		conn:                        c,
 		baseCtx:                     baseCtx,
 		remoteAddrStr:               c.RemoteAddr().String(),
-		bw:                          newBufferedWriter(c),
+		bw:                          newBufferedWriterSize(c, s.WriteBufferSize),
 		handler:                     opts.handler(),
 		streams:                     make(map[uint32]*stream),
 		readFrameCh:                 make(chan readFrameResult),

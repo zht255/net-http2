@@ -241,17 +241,18 @@ func (cw closeWaiter) Wait() {
 // Its buffered writer is lazily allocated as needed, to minimize
 // idle memory usage with many connections.
 type bufferedWriter struct {
-	_  incomparable
-	w  io.Writer     // immutable
-	bw *bufio.Writer // non-nil when data is buffered
+	_    incomparable
+	w    io.Writer     // immutable
+	bw   *bufio.Writer // non-nil when data is buffered
+	size int           // immutable
+	pool *sync.Pool    // immutable; nil for uncommon sizes
 }
 
 func newBufferedWriter(w io.Writer) *bufferedWriter {
-	return &bufferedWriter{w: w}
+	return newBufferedWriterSize(w, bufWriterPoolBufferSize)
 }
 
-// bufWriterPoolBufferSize is the size of bufio.Writer's
-// buffers created using bufWriterPool.
+// bufWriterPoolBufferSize is the default connection output buffer size.
 //
 // A Watch batch of eight approximately 4 KiB events exceeds 32 KiB once
 // event length prefixes and HTTP/2 DATA frame headers are included. Retain
@@ -259,22 +260,40 @@ func newBufferedWriter(w io.Writer) *bufferedWriter {
 // flush boundary. This does not change stream buffers or flow-control windows.
 const bufWriterPoolBufferSize = 64 << 10
 
-var bufWriterPool = sync.Pool{
-	New: func() interface{} {
-		return bufio.NewWriterSize(nil, bufWriterPoolBufferSize)
-	},
+// Use bounded, separate pools for common sizes. Uncommon sizes remain exact
+// but are not pooled, so arbitrary Server configurations cannot grow a global
+// pool registry indefinitely.
+var bufWriterPools = func() map[int]*sync.Pool {
+	pools := make(map[int]*sync.Pool)
+	for size := 4 << 10; size <= 1<<20; size *= 2 {
+		pools[size] = new(sync.Pool)
+	}
+	return pools
+}()
+
+func newBufferedWriterSize(w io.Writer, size int) *bufferedWriter {
+	if size <= 0 {
+		size = bufWriterPoolBufferSize
+	}
+	return &bufferedWriter{w: w, size: size, pool: bufWriterPools[size]}
 }
 
 func (w *bufferedWriter) Available() int {
 	if w.bw == nil {
-		return bufWriterPoolBufferSize
+		return w.size
 	}
 	return w.bw.Available()
 }
 
 func (w *bufferedWriter) Write(p []byte) (n int, err error) {
 	if w.bw == nil {
-		bw := bufWriterPool.Get().(*bufio.Writer)
+		var bw *bufio.Writer
+		if w.pool != nil {
+			bw, _ = w.pool.Get().(*bufio.Writer)
+		}
+		if bw == nil {
+			bw = bufio.NewWriterSize(nil, w.size)
+		}
 		bw.Reset(w.w)
 		w.bw = bw
 	}
@@ -288,7 +307,9 @@ func (w *bufferedWriter) Flush() error {
 	}
 	err := bw.Flush()
 	bw.Reset(nil)
-	bufWriterPool.Put(bw)
+	if w.pool != nil {
+		w.pool.Put(bw)
+	}
 	w.bw = nil
 	return err
 }

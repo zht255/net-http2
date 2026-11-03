@@ -182,3 +182,101 @@ func (l *pausedWriteListener) Accept() (net.Conn, error) {
 	l.accepted <- p
 	return p, nil
 }
+
+func TestBufferedWriterConfiguredSizes(t *testing.T) {
+	for _, size := range []int{-1, 0, 1, 4096, 16384, 32768, 65536, 131072, 12345, 1 << 20} {
+		t.Run(fmt.Sprint(size), func(t *testing.T) {
+			t.Parallel()
+			wantSize := size
+			if wantSize <= 0 {
+				wantSize = 65536
+			}
+			payload := watchBatchBytes(8)
+			var expected bytes.Buffer
+			if err := writeWatchDataFrames(&expected, payload); err != nil {
+				t.Fatal(err)
+			}
+			for round := 0; round < 10; round++ {
+				sink := &watchBufferSink{}
+				w := newBufferedWriterSize(sink, size)
+				if w.bw != nil || w.Available() != wantSize {
+					t.Fatal("unexpected initial allocation or capacity")
+				}
+				if err := writeWatchDataFrames(w, payload); err != nil {
+					t.Fatal(err)
+				}
+				if w.bw.Size() != wantSize {
+					t.Fatalf("buffer size = %d, want %d", w.bw.Size(), wantSize)
+				}
+				if err := w.Flush(); err != nil {
+					t.Fatal(err)
+				}
+				if !bytes.Equal(sink.Bytes(), expected.Bytes()) {
+					t.Fatal("framed bytes changed")
+				}
+				if w.bw != nil || w.Available() != wantSize {
+					t.Fatal("buffer not released or capacity changed")
+				}
+				wantWrites := map[int]int{4096: 3, 16384: 3, 32768: 2, 65536: 1}[wantSize]
+				if wantWrites > 0 && sink.writes != wantWrites {
+					t.Fatalf("writes = %d, want %d", sink.writes, wantWrites)
+				}
+				before := sink.writes
+				if err := w.Flush(); err != nil || sink.writes != before {
+					t.Fatal("empty flush wrote bytes")
+				}
+			}
+		})
+	}
+}
+
+func TestBufferedWriterConfiguredFailure(t *testing.T) {
+	for _, size := range []int{4096, 65536, 12345} {
+		t.Run(fmt.Sprint(size), func(t *testing.T) {
+			failure := errors.New("write failed")
+			sink := &watchBufferSink{failure: failure}
+			w := newBufferedWriterSize(sink, size)
+			if _, err := w.Write([]byte("old")); err != nil {
+				t.Fatal(err)
+			}
+			if err := w.Flush(); err != failure {
+				t.Fatalf("flush error = %v", err)
+			}
+			if w.bw != nil {
+				t.Fatal("failed buffer not released")
+			}
+			sink.failure = nil
+			// A fresh writer may obtain the failed writer's pooled buffer.
+			next := newBufferedWriterSize(sink, size)
+			if _, err := next.Write([]byte("new")); err != nil {
+				t.Fatal(err)
+			}
+			if err := next.Flush(); err != nil {
+				t.Fatal(err)
+			}
+			if sink.String() != "new" {
+				t.Fatalf("stale bytes: %q", sink.String())
+			}
+		})
+	}
+}
+
+func TestServerWriteBufferSize(t *testing.T) {
+	for _, size := range []int{-1, 0, 4096, 16384, 32768, 65536, 12345} {
+		t.Run(fmt.Sprint(size), func(t *testing.T) {
+			st := newServerTester(t, nil, func(s *Server) { s.WriteBufferSize = size })
+			defer st.Close()
+			st.greet()
+			wantSize := size
+			if wantSize <= 0 {
+				wantSize = 65536
+			}
+			st.scMu.Lock()
+			got := st.sc.bw.size // Immutable after connection construction.
+			st.scMu.Unlock()
+			if got != wantSize {
+				t.Fatalf("connection buffer size = %d, want %d", got, wantSize)
+			}
+		})
+	}
+}
