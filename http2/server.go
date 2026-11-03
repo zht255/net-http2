@@ -92,6 +92,18 @@ type Server struct {
 	// from 4 KiB through 1 MiB share size-specific pools; other sizes are unpooled.
 	WriteBufferSize int
 
+	// EnableDataFrameAllocationOptimization allocates the two descriptors of
+	// a split DATA request together. It reduces allocations without changing
+	// framing, flow control, or completion notification. The default is false.
+	// Set before serving; changing this field while serving is unsupported.
+	EnableDataFrameAllocationOptimization bool
+
+	// EnableWriteDataPoolCleanup clears completed write descriptors before
+	// pooling them, so idle descriptors do not retain handler payloads.
+	// It does not clear requests still owned by the connection writer.
+	// The default is false. Set before serving; runtime mutation is unsupported.
+	EnableWriteDataPoolCleanup bool
+
 	// MaxHandlers limits the number of http.Handler ServeHTTP goroutines
 	// which may run at a time over all connections.
 	// Negative or zero no limit.
@@ -1038,6 +1050,9 @@ func (sc *serverConn) writeDataFromHandler(stream *stream, data []byte, endStrea
 	}
 	errChanPool.Put(ch)
 	if frameWriteDone {
+		if sc.srv != nil && sc.srv.EnableWriteDataPoolCleanup {
+			*writeArg = writeData{}
+		}
 		writeDataPool.Put(writeArg)
 	}
 	return err

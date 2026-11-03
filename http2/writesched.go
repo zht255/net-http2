@@ -123,6 +123,16 @@ func (wr FrameWriteRequest) Consume(n int32) (FrameWriteRequest, FrameWriteReque
 	}
 	if len(wd.p) > int(allowed) {
 		wr.stream.flow.take(allowed)
+		if wr.stream.sc.srv != nil && wr.stream.sc.srv.EnableDataFrameAllocationOptimization {
+			// Keep the original request unchanged; only the last fragment
+			// carries END_STREAM and the completion notification.
+			parts := &[2]writeData{
+				{streamID: wd.streamID, p: wd.p[:allowed]},
+				{streamID: wd.streamID, p: wd.p[allowed:], endStream: wd.endStream},
+			}
+			return FrameWriteRequest{stream: wr.stream, write: &parts[0]},
+				FrameWriteRequest{stream: wr.stream, write: &parts[1], done: wr.done}, 2
+		}
 		consumed := FrameWriteRequest{
 			stream: wr.stream,
 			write: &writeData{
