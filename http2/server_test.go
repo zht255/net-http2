@@ -1186,29 +1186,35 @@ func TestServer_Ping(t *testing.T) {
 }
 
 func TestServer_MaxQueuedControlFrames(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping in short mode")
-	}
-
-	st := newServerTester(t, nil)
+	accepted := make(chan *pausedWriteConn, 1)
+	st := newServerTester(t, nil, func(ts *httptest.Server) {
+		ts.Listener = &pausedWriteListener{Listener: ts.Listener, accepted: accepted}
+	})
 	defer st.Close()
 	st.greet()
-
-	const extraPings = 500000 // enough to fill the TCP buffers
-
-	for i := 0; i < maxQueuedControlFrames+extraPings; i++ {
-		pingData := [8]byte{1, 2, 3, 4, 5, 6, 7, 8}
-		if err := st.fr.WritePing(false, pingData); err != nil {
+	conn := <-accepted
+	close(conn.pause)
+	// Replies cannot drain once the server's next socket write blocks. This
+	// tests the queue limit rather than assuming 500000 PINGs fill OS buffers.
+	for i := 0; i < maxQueuedControlFrames+16; i++ {
+		if err := st.fr.WritePing(false, [8]byte{1, 2, 3, 4, 5, 6, 7, 8}); err != nil {
 			if i == 0 {
 				t.Fatal(err)
 			}
-			// We expect the connection to get closed by the server when the TCP
-			// buffer fills up and the write queue reaches MaxQueuedControlFrames.
-			t.Logf("sent %d PING frames", i)
 			return
 		}
 	}
-	t.Errorf("unexpected success sending all PING frames")
+	if err := st.cc.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	for {
+		if _, err := st.fr.ReadFrame(); err != nil {
+			if e, ok := err.(net.Error); ok && e.Timeout() {
+				t.Fatal("server did not close the blocked control-frame connection")
+			}
+			return
+		}
+	}
 }
 
 func TestServer_RejectsLargeFrames(t *testing.T) {
@@ -2569,6 +2575,9 @@ func TestServer_Rejects_TLS11(t *testing.T) { testRejectTLS(t, tls.VersionTLS11)
 
 func testRejectTLS(t *testing.T, max uint16) {
 	st := newServerTester(t, nil, func(c *tls.Config) {
+		// Explicitly enable the legacy client version on modern Go toolchains.
+		// The assertion below still requires HTTP/2 to reject it.
+		c.MinVersion = max
 		c.MaxVersion = max
 	})
 	defer st.Close()

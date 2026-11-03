@@ -253,10 +253,11 @@ func newBufferedWriter(w io.Writer) *bufferedWriter {
 // bufWriterPoolBufferSize is the size of bufio.Writer's
 // buffers created using bufWriterPool.
 //
-// TODO: pick a less arbitrary value? this is a bit under
-// (3 x typical 1500 byte MTU) at least. Other than that,
-// not much thought went into it.
-const bufWriterPoolBufferSize = 4 << 10
+// A Watch batch of eight approximately 4 KiB events exceeds 32 KiB once
+// event length prefixes and HTTP/2 DATA frame headers are included. Retain
+// enough connection-level space to coalesce that burst until the existing
+// flush boundary. This does not change stream buffers or flow-control windows.
+const bufWriterPoolBufferSize = 64 << 10
 
 var bufWriterPool = sync.Pool{
 	New: func() interface{} {
